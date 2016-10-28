@@ -9,7 +9,10 @@ import com.yahoo.elide.core.DataStoreTransaction;
 import com.yahoo.elide.core.EntityDictionary;
 import com.yahoo.elide.core.filter.InMemoryFilterOperation;
 import com.yahoo.elide.core.filter.Predicate;
-import com.yahoo.elide.core.filter.expression.PredicateExtractionVisitor;
+import com.yahoo.elide.core.filter.expression.AndFilterExpression;
+import com.yahoo.elide.core.filter.expression.NotFilterExpression;
+import com.yahoo.elide.core.filter.expression.OrFilterExpression;
+import com.yahoo.elide.core.filter.expression.Visitor;
 import com.yahoo.elide.security.RequestScope;
 import com.yahoo.elide.core.filter.expression.FilterExpression;
 import com.yahoo.elide.core.pagination.Pagination;
@@ -25,7 +28,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.Random;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
@@ -165,10 +167,9 @@ public class InMemoryTransaction implements DataStoreTransaction {
         }
         // Support for filtering
         if (filterExpression.isPresent()) {
-            Set<Predicate> predicates = filterExpression.get().accept(new PredicateExtractionVisitor());
-            Set<java.util.function.Predicate> filterFns = new InMemoryFilterOperation(dictionary).applyAll(predicates);
+            java.util.function.Predicate predicate = filterExpression.get().accept(new InMemoryFilter());
             return (Collection) objs.values().stream()
-                    .filter(e -> filterFns.stream().allMatch(fn -> fn.test(e)))
+                    .filter(predicate::test)
                     .collect(Collectors.toList());
         }
         List<Object> results = new ArrayList<>();
@@ -185,5 +186,37 @@ public class InMemoryTransaction implements DataStoreTransaction {
     public <T> Long getTotalRecords(Class<T> entityClass) {
         ConcurrentHashMap<String, Object> objs = dataStore.get(entityClass);
         return objs == null ? 0L : objs.size();
+    }
+
+    /**
+     * Visitor to retrieve a properly combined in-memory filter.
+     */
+    public class InMemoryFilter implements Visitor<java.util.function.Predicate> {
+        private final InMemoryFilterOperation operation = new InMemoryFilterOperation(dictionary);
+
+        @Override
+        public java.util.function.Predicate visitPredicate(Predicate predicate) {
+            return operation.apply(predicate).iterator().next();
+        }
+
+        @Override
+        public java.util.function.Predicate visitAndExpression(AndFilterExpression expression) {
+            java.util.function.Predicate left = expression.getLeft().accept(this);
+            java.util.function.Predicate right = expression.getRight().accept(this);
+            return left.and(right);
+        }
+
+        @Override
+        public java.util.function.Predicate visitOrExpression(OrFilterExpression expression) {
+            java.util.function.Predicate left = expression.getLeft().accept(this);
+            java.util.function.Predicate right = expression.getRight().accept(this);
+            return left.or(right);
+        }
+
+        @Override
+        public java.util.function.Predicate visitNotExpression(NotFilterExpression expression) {
+            java.util.function.Predicate result = expression.accept(this);
+            return result.negate();
+        }
     }
 }
